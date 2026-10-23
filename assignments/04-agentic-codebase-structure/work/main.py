@@ -9,10 +9,12 @@ Run:
 Test:
     pytest
 """
+import re
 import sqlite3
 import string
 from contextlib import closing
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
@@ -22,6 +24,9 @@ DB_PATH = Path(__file__).parent / "links.db"
 ALPHABET = string.ascii_letters + string.digits
 
 app = FastAPI(title="Link Shortener")
+
+# Valid alias: 1-30 chars, letters / digits / hyphen / underscore only.
+_ALIAS_RE = re.compile(r"^[A-Za-z0-9_-]{1,30}$")
 
 
 def get_db() -> sqlite3.Connection:
@@ -59,12 +64,30 @@ def encode(n: int) -> str:
 
 class ShortenRequest(BaseModel):
     url: str
+    alias: Optional[str] = None
 
 
 @app.post("/shorten")
 def shorten(req: ShortenRequest):
     if not req.url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="url must start with http:// or https://")
+
+    if req.alias is not None:
+        # Validate alias format: 1-30 chars, [A-Za-z0-9_-] only.
+        if not _ALIAS_RE.match(req.alias):
+            raise HTTPException(
+                status_code=400,
+                detail="alias must be 1-30 characters and contain only letters, digits, hyphens, or underscores",
+            )
+        try:
+            with closing(get_db()) as conn:
+                conn.execute("INSERT INTO links (code, url) VALUES (?, ?)", (req.alias, req.url))
+                conn.commit()
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=409, detail="alias already taken")
+        return {"code": req.alias, "short_url": f"/{req.alias}"}
+
+    # No alias supplied — auto-generate a base62 code from the row id.
     with closing(get_db()) as conn:
         cur = conn.execute("INSERT INTO links (url) VALUES (?)", (req.url,))
         row_id = cur.lastrowid
